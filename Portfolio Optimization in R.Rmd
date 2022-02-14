@@ -1,0 +1,243 @@
+---
+title: "Portfolio Optimization in R"
+output:
+        prettydoc::html_pretty:
+                theme: architect
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd('/Users/COLLABERA TECH/Downloads/upwork/')
+```
+
+This document presents the steps in conducting portfolio optimization in R. GitHub repository is found [here](https://github.com/imjbmkz/portfolio_optimization).
+
+<br><br>
+
+### Importing packages required
+
+We will use several packages that will help us pull stocks data and to visualize risks and returns. The following code installs the packages required if they're not yet installed. Afterwards, they will be loaded in our current R session.
+
+```{r install_packages, warning=F, message=F}
+## (1) Define the packages that will be needed
+packages <- c('tidyquant', 'quantmod', 'TTR', 'PerformanceAnalytics', 'PortfolioAnalytics')
+
+## (2) Install them if not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+
+## (3) Load the packages into R session
+invisible(lapply(packages, library, character.only = TRUE))
+```
+
+<br><br>
+
+### Getting stocks adjusted prices data 
+
+Let's now load the stocks data that we will be needing. First, we will define a variable called `myStocks` that has the stock symbols that we want. Modify these based on what you need.
+
+```{r define_stock_codes}
+## Create a character vector that has the stock codes we need
+myStocks <- c('AUB', 'EW', 'PSB', 'PTC', 'UBP')
+```
+
+Then, let's define the script that will load these stocks into R. We use `lapply` to "*apply*" a function across a list or a vector. The below code is going through all stock codes in `myStocks` variable, and loads it using the `getSymbols` function from quantmod package. Note that we are getting the weekly stocks data, and the parameter `auto.assign` is set to `FALSE` to load the `xts` object into `myStocks` variable. Finally, we give the list index names based on the data that they represent.
+
+```{r, warning=F, message=F}
+## Load the stocks needed into R 
+myStocks <- lapply(myStocks, function(x) {getSymbols(
+        x, periodicity='weekly', auto.assign=FALSE)})
+
+## Set the names in the list to easily access them.
+names(myStocks) <- c('AUB', 'EW', 'PSB', 'PTC', 'UBP')
+```
+
+We can look at the first few row of the stocks data that we loaded.
+
+```{r head_stocks}
+## View first three rows of selected stock
+head(myStocks$AUB, 3)
+```
+
+For this exercise, we are only interested in the adjusted prices of the stocks. The `Ad` function still from quantmod package does that. We again use `lapply` to use `Ad` function across all other stocks. To better work with the data, this has been transformed into an `xts` object instead of just a `list`.
+
+```{r get_adj_price}
+## Get adjusted prices of all stocks
+myStocks_ad <- lapply(myStocks, Ad)
+
+## Transform into xts
+myStocks_ad <- do.call(merge, myStocks_ad)
+```
+
+Let's see how the data looks like.
+
+```{r}
+## View first 3 rows of the combined different adjusted prices 
+head(myStocks_ad, 3)
+```
+
+<br><br>
+
+### Getting weekly log returns 
+
+Now that we have our merged adjusted prices of different stock codes, let's get their corresponding weekly returns. We still use `lapply`, `do.call`, and `merge` functions to do it. We are removing the first row since there are no returns on the first observation in the data.
+
+```{r get_weekly_log_ret}
+## Make a list that contains log weekly returns of each stock
+myStocks_returns <- lapply(myStocks_ad, weeklyReturn, type='log')
+
+## Tranform into an xts object
+myStocks_returns <- do.call(merge, myStocks_returns)
+
+## Adjust the column names 
+colnames(myStocks_returns) <- c(
+        'AUB.weekly.returns', 'EW.weekly.returns', 'PSB.weekly.returns',
+        'PTC.weekly.returns', 'UBP.weekly.returns')
+
+## Remove first row since these do not have returns
+myStocks_returns <- myStocks_returns[-1]
+```
+
+Let's look at it.
+
+```{r}
+head(myStocks_returns, 3)
+```
+
+To avoid several steps above, we can use `Return.calculate` function from PerformanceAnalytics package. We still need to remove the first row as it pertains to the first observation.
+
+```{r performance_analytics_returns}
+## Use Return.calculate to easily get returns, and remove -1
+myStocks_returns_PA <- Return.calculate(myStocks_ad, method='log')[-1]
+```
+
+Let's look at it.
+
+```{r}
+head(myStocks_returns_PA, 3)
+```
+
+Now that we're done calculating weekly returns of each stock, let's get the returns for the entire portfolio. We're generating random weights for each stock, then using those weights, we calculate our returns. $PortfolioReturns = \sum{stocks * weights}$
+
+```{r random_weights}
+## Generate random weights
+random_weights <- runif(5)
+random_weights <- random_weights / sum(random_weights)
+
+## Generate portfolio weighted returns
+portfolio_return <- Return.portfolio(myStocks_returns, random_weights)
+
+## Generate portfolio weighted returns with rebalancing
+portfolio_return_rebalance <- Return.portfolio(myStocks_returns, random_weights, rebalance_on='months')
+
+## Combine results 
+portfolio_return_both <- cbind(portfolio_return, portfolio_return_rebalance)
+
+## Change column names
+colnames(portfolio_return_both) <- c('non_rebalanced', 'monthly_rebalanced')
+```
+
+Let's also get the annualized returns of the data with risk-free rate of 10% divided by 52 weeks. This is added on the `Rf` parameter of `table.AnnualizedReturns` function.
+
+```{r}
+annual_returns_table <- table.AnnualizedReturns(portfolio_return_both, Rf=0.1/52)
+annual_returns_table
+```
+
+Based on the above results, rebalancing the data gave a lower return, but a slightly lower risk than the non_rebalanced weights.
+
+Let's now proceed to portfolio optimization.
+
+<br><br> 
+
+### Portfolio optimization
+
+<br>
+
+#### Step 1: Define the specification
+We will define a portfolio specification object using `portfolio.spec` function from PortfolioPerformance package. This will serve as our placeholder so that we can feed other metrics, such as constraints, into this object.
+```{r portfolio_specs}
+port_spec <- portfolio.spec(assets=colnames(myStocks_returns))
+```
+
+<br>
+
+#### Step 2: Adding the constraints required
+We will add constraints that will control the values that will be assigned to each parameter. Specifically, we want: 
+
+1. The weighted sum to be exactly 100%, but we're adding a small interval of 0.01, so weighted sum can be between 0.99 to 1.01. 
+
+2. We want the weights to be positive. It must not be a negative number.
+
+3. Finally, we want to control the minimum and maximum weights that will be assigned to individual stock.
+
+```{r constraints}
+## Define first constraint
+port_spec <- add.constraint(portfolio=port_spec, type='weight_sum', min_sum=0.99, max_sum=1.01)
+
+## Define second constraint
+port_spec <- add.constraint(portfolio=port_spec, type='long_only')
+
+## Define third constraint
+port_spec <- add.constraint(portfolio=port_spec, type='box', min=0.1, max=0.3)
+```
+
+<br>
+
+#### Step 3: Add the objective of the portfolio
+In portfolio optimization, the objective is to either minimize the risk or to maximize returns. Our objective is to minimize the risk The following code will define that objective.
+
+```{r minimize_risk}
+port_spec_min <- add.objective(portfolio=port_spec, type='risk', name='StdDev')
+```
+
+We'll now start optimizing the portfolio to minimize the risk.
+
+<br>
+
+#### Step 4: Optimization - minimizing risk
+We will now start with the optimization process to minimize risk. We make another variable called `optimize_min_risk`. We set the randomization seed to make sure that in the next run of this markdown file, we still get the same results.
+
+```{r optimize_risk, warning=F, message=F}
+set.seed(1234)
+optimize_min_risk <- optimize.portfolio(
+        R=myStocks_returns, portfolio=port_spec_min, 
+        optimize_method='random')
+```
+
+Afterwards, we can get the best weights per asset. 
+
+```{r}
+optimize_min_risk$weights
+```
+
+The above plot tells us that in order to get a minimum risk, the weights of each asset must be as defined above. We can also get the minimized risk from the model, and compare it with the individual risk associated per asset.
+
+```{r}
+## Get optimized risk
+min_risk <- optimize_min_risk$objective_measures$StdDev[1,1]
+
+## Get risk per asset
+asset_risks <- sapply(myStocks_returns, sd)
+
+## Check if optimized risk is lower than individual risks
+for (i in 1:5) {
+        if (min_risk < asset_risks[[i]]) {
+                cat('Optimized risk is lower than ', 
+                    names(asset_risks)[i], '\' risk\n', sep='')
+        } else {
+                cat('Optimized risk is higher than ', 
+                    names(asset_risks)[i], '\' risk\n', sep='')
+        }
+}
+```
+
+We can see from the above results that our optimized risk is lower than the individual risks of assets.
+
+
+
+
+
+
